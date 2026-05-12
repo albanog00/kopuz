@@ -49,7 +49,9 @@ pub fn Rightbar(
                 {
                     Some(l)
                 } else {
-                    Some(utils::lyrics::Lyrics::Plain(i18n::t("lyrics_not_found").to_string()))
+                    Some(utils::lyrics::Lyrics::Plain(
+                        i18n::t("lyrics_not_found").to_string(),
+                    ))
                 }
             } else {
                 None
@@ -191,9 +193,13 @@ pub fn Rightbar(
         .sum();
     let up_next_summary = format!(
         "{} • {}",
-        i18n::t_with("showcase_song_count", &[("count", up_next_count.to_string())]),
+        i18n::t_with(
+            "showcase_song_count",
+            &[("count", up_next_count.to_string())]
+        ),
         format_queue_duration(up_next_duration)
     );
+    let shuffle = *ctrl.shuffle.read();
 
     rsx! {
         div {
@@ -292,6 +298,7 @@ pub fn Rightbar(
                     }
                     for i in 0..*current_queue_index.read() {
                         {
+                            let i = if shuffle { ctrl.shuffle_order.read()[i] } else {i};
                             let track = queue.read()[i].clone();
                             let cover_url = get_track_cover(&track);
                             rsx! {
@@ -330,18 +337,19 @@ pub fn Rightbar(
                             "{up_next_summary}"
                         }
                     }
-                    for i in (*current_queue_index.read() + 1)..queue.read().len() {
+                    for queue_idx in (*current_queue_index.read() + 1)..queue.read().len() {
                         {
-                            let track = queue.read()[i].clone();
+                            let track_idx = if shuffle { ctrl.shuffle_order.read()[queue_idx] } else {queue_idx};
+                            let track = queue.read()[track_idx].clone();
                             let cover_url = get_track_cover(&track);
-                            let can_move_up = i > *current_queue_index.read() + 1;
-                            let can_move_down = i + 1 < queue.read().len();
+                            let can_move_up = !shuffle && track_idx > *current_queue_index.read() + 1;
+                            let can_move_down = !shuffle && track_idx + 1 < queue.read().len();
                             rsx! {
                                 div {
-                                    key: "{i}",
+                                    key: "{queue_idx}",
                                     class: "flex items-center gap-3 px-2 py-2 hover:bg-white/5 cursor-pointer rounded-lg transition-colors group",
                                     style: "content-visibility: auto; contain-intrinsic-size: 0 56px;",
-                                    ondoubleclick: move |_| play_song_at_index(i),
+                                    ondoubleclick: move |_| play_song_at_index(queue_idx),
                                     div {
                                         class: "rounded-md overflow-hidden bg-black/30 flex-shrink-0 shadow-sm",
                                         style: "width: 40px; height: 40px;",
@@ -359,12 +367,14 @@ pub fn Rightbar(
                                         div { class: "text-sm text-white truncate font-medium", "{track.title}" }
                                         div { class: "text-xs text-white/50 truncate group-hover:text-white/70", "{track.artist}" }
                                     }
-                                    ReorderButtons {
-                                        can_move_up,
-                                        can_move_down,
-                                        class: "flex flex-col pr-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity".to_string(),
-                                        on_move_up: move |_| move_queue_item(i, i - 1),
-                                        on_move_down: move |_| move_queue_item(i, i + 1),
+                                    if !shuffle {
+                                        ReorderButtons {
+                                            can_move_up,
+                                            can_move_down,
+                                            class: "flex flex-col pr-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity".to_string(),
+                                            on_move_up: move |_| move_queue_item(queue_idx, queue_idx - 1),
+                                            on_move_down: move |_| move_queue_item(queue_idx, queue_idx + 1),
+                                        }
                                     }
                                 }
                             }

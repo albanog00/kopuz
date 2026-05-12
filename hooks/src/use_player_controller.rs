@@ -76,7 +76,12 @@ impl PlayerController {
     }
 
     fn current_track(&self, idx: usize) -> Option<Track> {
-        self.queue.peek().get(idx).cloned()
+        let track_idx = if *self.shuffle.peek() {
+            self.shuffle_order.peek()[idx]
+        } else {
+            idx
+        };
+        self.queue.peek().get(track_idx).cloned()
     }
 
     fn cover_url_for_track(&self, track: &Track) -> String {
@@ -152,7 +157,8 @@ impl PlayerController {
             self.current_song_bitrate.set(track.bitrate);
             self.current_song_duration.set(track.duration);
             self.current_song_progress.set(progress_secs);
-            self.current_song_cover_url.set(self.cover_url_for_track(&track));
+            self.current_song_cover_url
+                .set(self.cover_url_for_track(&track));
         } else {
             self.current_queue_index.set(0);
             self.clear_current_track_metadata();
@@ -274,16 +280,11 @@ impl PlayerController {
         }
 
         let loop_mode = *self.loop_mode.peek();
-        let shuffle = *self.shuffle.peek();
 
         match loop_mode {
             LoopMode::Track => true,
             _ => {
-                if shuffle && queue_len > 1 {
-                    !self.shuffle_order.peek().is_empty() || loop_mode == LoopMode::Queue
-                } else if shuffle && queue_len == 1 {
-                    true
-                } else if idx + 1 < queue_len {
+                if idx + 1 < queue_len {
                     true
                 } else {
                     loop_mode == LoopMode::Queue
@@ -300,6 +301,9 @@ impl PlayerController {
             }
         });
         self.play_track_no_history_without_crossfade(idx);
+        if *self.shuffle.peek() {
+            self.rebuild_shuffle_order();
+        }
     }
 
     pub fn play_track_no_history(&mut self, idx: usize) {
@@ -319,11 +323,11 @@ impl PlayerController {
             let (restore_seek_secs, clear_pending_resume_on_success) =
                 self.pending_resume_seek(&track);
             let use_crossfade = allow_crossfade
-                &&
-                self.should_crossfade() && restore_seek_secs.map_or(true, |secs| secs == 0);
+                && self.should_crossfade()
+                && restore_seek_secs.map_or(true, |secs| secs == 0);
             let outgoing_duration_secs = *self.current_song_duration.peek();
-            let outgoing_progress_secs = (*self.current_song_progress.peek())
-                .min(outgoing_duration_secs);
+            let outgoing_progress_secs =
+                (*self.current_song_progress.peek()).min(outgoing_duration_secs);
             if !use_crossfade {
                 self.clear_pending_crossfade_ui();
             }
@@ -344,7 +348,9 @@ impl PlayerController {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     let offline_path = {
-                        let raw = self.config.read()
+                        let raw = self
+                            .config
+                            .read()
                             .offline_tracks
                             .get(&id)
                             .map(std::path::PathBuf::from)
@@ -369,11 +375,9 @@ impl PlayerController {
                     if let Some(local_path) = offline_path {
                         if let Ok((source, hint)) = decoder::open_file(&local_path) {
                             if !use_crossfade {
-                                self.current_queue_index.set(idx);
                                 self.player.write().stop_for_transition();
                                 self.is_playing.set(false);
                             }
-
                             let cover_url = self.cover_url_for_track(&track);
                             if !use_crossfade {
                                 self.hydrate_current_track_metadata(idx, 0);
@@ -502,7 +506,6 @@ impl PlayerController {
                         }
                     })
                 } {
-
                     if stream_url.is_empty() {
                         self.is_loading.set(false);
                         self.skip_in_progress.set(false);
@@ -605,17 +608,37 @@ impl PlayerController {
                                         let subsonic_now = {
                                             let conf = scrobble_cfg.read();
                                             conf.server.as_ref().and_then(|s| {
-                                                if matches!(s.service, MusicService::Subsonic | MusicService::Custom) {
-                                                    if let (Some(pw), Some(un)) = (&s.access_token, &s.user_id) {
-                                                        Some((s.url.clone(), un.clone(), pw.clone()))
-                                                    } else { None }
-                                                } else { None }
+                                                if matches!(
+                                                    s.service,
+                                                    MusicService::Subsonic | MusicService::Custom
+                                                ) {
+                                                    if let (Some(pw), Some(un)) =
+                                                        (&s.access_token, &s.user_id)
+                                                    {
+                                                        Some((
+                                                            s.url.clone(),
+                                                            un.clone(),
+                                                            pw.clone(),
+                                                        ))
+                                                    } else {
+                                                        None
+                                                    }
+                                                } else {
+                                                    None
+                                                }
                                             })
                                         };
                                         if let Some((url, username, password)) = subsonic_now {
-                                            let client = ::server::subsonic::SubsonicClient::new(&url, &username, &password);
-                                            if let Err(e) = client.scrobble_now_playing(&scrobble_id).await {
-                                                tracing::warn!("Subsonic now-playing failed: {}", e);
+                                            let client = ::server::subsonic::SubsonicClient::new(
+                                                &url, &username, &password,
+                                            );
+                                            if let Err(e) =
+                                                client.scrobble_now_playing(&scrobble_id).await
+                                            {
+                                                tracing::warn!(
+                                                    "Subsonic now-playing failed: {}",
+                                                    e
+                                                );
                                             }
                                         }
                                     }
@@ -641,10 +664,7 @@ impl PlayerController {
                                         )
                                         .await
                                         {
-                                            tracing::warn!(
-                                                "failed to submit playing_now: {}",
-                                                e
-                                            );
+                                            tracing::warn!("failed to submit playing_now: {}", e);
                                         }
                                     }
 
@@ -661,22 +681,40 @@ impl PlayerController {
                                         let subsonic_scrobble = {
                                             let conf = scrobble_cfg.read();
                                             conf.server.as_ref().and_then(|s| {
-                                                if matches!(s.service, MusicService::Subsonic | MusicService::Custom) {
-                                                    if let (Some(pw), Some(un)) = (&s.access_token, &s.user_id) {
-                                                        Some((s.url.clone(), un.clone(), pw.clone()))
-                                                    } else { None }
-                                                } else { None }
+                                                if matches!(
+                                                    s.service,
+                                                    MusicService::Subsonic | MusicService::Custom
+                                                ) {
+                                                    if let (Some(pw), Some(un)) =
+                                                        (&s.access_token, &s.user_id)
+                                                    {
+                                                        Some((
+                                                            s.url.clone(),
+                                                            un.clone(),
+                                                            pw.clone(),
+                                                        ))
+                                                    } else {
+                                                        None
+                                                    }
+                                                } else {
+                                                    None
+                                                }
                                             })
                                         };
                                         if let Some((url, username, password)) = subsonic_scrobble {
-                                            let client = ::server::subsonic::SubsonicClient::new(&url, &username, &password);
+                                            let client = ::server::subsonic::SubsonicClient::new(
+                                                &url, &username, &password,
+                                            );
                                             match client.scrobble(&scrobble_id).await {
                                                 Ok(_) => tracing::info!(
                                                     "Subsonic scrobbled: {} - {}",
                                                     scrobble_track.artist,
                                                     scrobble_track.title
                                                 ),
-                                                Err(e) => tracing::warn!("Subsonic scrobble failed: {}", e),
+                                                Err(e) => tracing::warn!(
+                                                    "Subsonic scrobble failed: {}",
+                                                    e
+                                                ),
                                             }
                                         }
                                     }
@@ -790,24 +828,33 @@ impl PlayerController {
                                 let scrobble_cfg = cfg_signal;
                                 let scrobble_id = id.clone();
                                 let duration_secs = scrobble_track.duration;
-                                let threshold_secs =
-                                    std::cmp::min(240, (duration_secs / 2) as u64);
+                                let threshold_secs = std::cmp::min(240, (duration_secs / 2) as u64);
 
                                 spawn(async move {
                                     {
                                         let conf = scrobble_cfg.read();
                                         if let Some(server) = conf.server.as_ref() {
-                                            if matches!(server.service, MusicService::Subsonic | MusicService::Custom) {
+                                            if matches!(
+                                                server.service,
+                                                MusicService::Subsonic | MusicService::Custom
+                                            ) {
                                                 if let (Some(password), Some(username)) =
                                                     (&server.access_token, &server.user_id)
                                                 {
-                                                    let client = ::server::subsonic::SubsonicClient::new(
-                                                        &server.url,
-                                                        username,
-                                                        password,
-                                                    );
-                                                    if let Err(e) = client.scrobble_now_playing(&scrobble_id).await {
-                                                        tracing::warn!("Subsonic now-playing failed: {}", e);
+                                                    let client =
+                                                        ::server::subsonic::SubsonicClient::new(
+                                                            &server.url,
+                                                            username,
+                                                            password,
+                                                        );
+                                                    if let Err(e) = client
+                                                        .scrobble_now_playing(&scrobble_id)
+                                                        .await
+                                                    {
+                                                        tracing::warn!(
+                                                            "Subsonic now-playing failed: {}",
+                                                            e
+                                                        );
                                                     }
                                                 }
                                             }
@@ -835,10 +882,7 @@ impl PlayerController {
                                         )
                                         .await
                                         {
-                                            tracing::warn!(
-                                                "failed to submit playing_now: {}",
-                                                e
-                                            );
+                                            tracing::warn!("failed to submit playing_now: {}", e);
                                         }
                                     }
 
@@ -853,22 +897,40 @@ impl PlayerController {
                                         let subsonic_scrobble = {
                                             let conf = scrobble_cfg.read();
                                             conf.server.as_ref().and_then(|s| {
-                                                if matches!(s.service, MusicService::Subsonic | MusicService::Custom) {
-                                                    if let (Some(pw), Some(un)) = (&s.access_token, &s.user_id) {
-                                                        Some((s.url.clone(), un.clone(), pw.clone()))
-                                                    } else { None }
-                                                } else { None }
+                                                if matches!(
+                                                    s.service,
+                                                    MusicService::Subsonic | MusicService::Custom
+                                                ) {
+                                                    if let (Some(pw), Some(un)) =
+                                                        (&s.access_token, &s.user_id)
+                                                    {
+                                                        Some((
+                                                            s.url.clone(),
+                                                            un.clone(),
+                                                            pw.clone(),
+                                                        ))
+                                                    } else {
+                                                        None
+                                                    }
+                                                } else {
+                                                    None
+                                                }
                                             })
                                         };
                                         if let Some((url, username, password)) = subsonic_scrobble {
-                                            let client = ::server::subsonic::SubsonicClient::new(&url, &username, &password);
+                                            let client = ::server::subsonic::SubsonicClient::new(
+                                                &url, &username, &password,
+                                            );
                                             match client.scrobble(&scrobble_id).await {
                                                 Ok(_) => tracing::info!(
                                                     "Subsonic scrobbled: {} - {}",
                                                     scrobble_track.artist,
                                                     scrobble_track.title
                                                 ),
-                                                Err(e) => tracing::warn!("Subsonic scrobble failed: {}", e),
+                                                Err(e) => tracing::warn!(
+                                                    "Subsonic scrobble failed: {}",
+                                                    e
+                                                ),
                                             }
                                         }
                                     }
@@ -1071,7 +1133,7 @@ impl PlayerController {
     }
 
     fn play_next_with_transition(&mut self, allow_crossfade: bool) {
-        let idx = *self.current_queue_index.peek();
+        let queue_idx = *self.current_queue_index.peek();
         let queue_len = self.queue.peek().len();
 
         if queue_len == 0 {
@@ -1080,96 +1142,48 @@ impl PlayerController {
 
         let loop_mode = *self.loop_mode.peek();
         let shuffle = *self.shuffle.peek();
+        let track_idx = if shuffle {
+            self.shuffle_order.peek()[queue_idx]
+        } else {
+            queue_idx
+        };
 
         match loop_mode {
             LoopMode::Track => {
                 if allow_crossfade {
-                    let current_idx = *self.current_queue_index.peek();
+                    let current_idx = queue_idx;
                     self.history.with_mut(|h| {
                         if h.last() != Some(&current_idx) {
                             h.push(current_idx);
                         }
                     });
-                    self.play_track_no_history_with_transition(idx, true);
+                    self.play_track_no_history_with_transition(track_idx, true);
                 } else {
-                    self.play_track_no_history_without_crossfade(idx);
+                    self.play_track_no_history_without_crossfade(track_idx);
                 }
             }
             _ => {
-                if shuffle && queue_len > 1 {
-                    let next_idx = self.shuffle_order.with_mut(|order| order.pop());
-                    match next_idx {
-                        Some(i) => {
-                            if allow_crossfade {
-                                let current_idx = *self.current_queue_index.peek();
-                                self.history.with_mut(|h| {
-                                    if h.last() != Some(&current_idx) {
-                                        h.push(current_idx);
-                                    }
-                                });
-                                self.play_track_no_history_with_transition(i, true);
-                            } else {
-                                self.play_track_no_history_without_crossfade(i);
-                            }
-                        }
-                        None => {
-                            if loop_mode == LoopMode::Queue {
-                                self.rebuild_shuffle_order();
-                                let i = self.shuffle_order.with_mut(|order| order.pop()).unwrap_or(0);
-                                if allow_crossfade {
-                                    let current_idx = *self.current_queue_index.peek();
-                                    self.history.with_mut(|h| {
-                                        if h.last() != Some(&current_idx) {
-                                            h.push(current_idx);
-                                        }
-                                    });
-                                    self.play_track_no_history_with_transition(i, true);
-                                } else {
-                                    self.play_track_no_history_without_crossfade(i);
-                                }
-                            } else {
-                                self.is_playing.set(false);
-                            }
-                        }
-                    }
-                } else if shuffle && queue_len == 1 {
-                    if allow_crossfade {
-                        let current_idx = *self.current_queue_index.peek();
-                        self.history.with_mut(|h| {
-                            if h.last() != Some(&current_idx) {
-                                h.push(current_idx);
-                            }
-                        });
-                        self.play_track_no_history_with_transition(0, true);
-                    } else {
-                        self.play_track_no_history_without_crossfade(0);
-                    }
-                } else if idx + 1 < queue_len {
-                    if allow_crossfade {
-                        let current_idx = *self.current_queue_index.peek();
-                        self.history.with_mut(|h| {
-                            if h.last() != Some(&current_idx) {
-                                h.push(current_idx);
-                            }
-                        });
-                        self.play_track_no_history_with_transition(idx + 1, true);
-                    } else {
-                        self.play_track_no_history_without_crossfade(idx + 1);
-                    }
-                } else if loop_mode == LoopMode::Queue {
-                    if allow_crossfade {
-                        let current_idx = *self.current_queue_index.peek();
-                        self.history.with_mut(|h| {
-                            if h.last() != Some(&current_idx) {
-                                h.push(current_idx);
-                            }
-                        });
-                        self.play_track_no_history_with_transition(0, true);
-                    } else {
-                        self.play_track_no_history_without_crossfade(0);
-                    }
+                if queue_idx == queue_len - 1 && loop_mode == LoopMode::None {
+                    // was last track and no loop enabled, do nothing
+                    return;
+                }
+
+                let next_idx = if queue_idx + 1 < queue_len {
+                    queue_idx + 1
                 } else {
-                    self.is_playing.set(false);
+                    0
+                };
+
+                if allow_crossfade {
+                    let current_idx = queue_idx;
+                    self.history.with_mut(|h| {
+                        if h.last() != Some(&current_idx) {
+                            h.push(current_idx);
+                        }
+                    });
+                    self.play_track_no_history_with_transition(next_idx, true);
+                } else {
+                    self.play_track_no_history_without_crossfade(next_idx);
                 }
             }
         }
@@ -1180,14 +1194,12 @@ impl PlayerController {
         let back_behavior = self.config.peek().back_behavior;
 
         if back_behavior == BackBehavior::RewindThenPrev && progress > 3 {
-            self.player
-                .write()
-                .seek(std::time::Duration::ZERO);
+            self.player.write().seek(std::time::Duration::ZERO);
             self.current_song_progress.set(0);
             return;
         }
 
-        let idx = *self.current_queue_index.peek();
+        let queue_index = *self.current_queue_index.peek();
         let queue_len = self.queue.peek().len();
 
         if queue_len == 0 {
@@ -1199,19 +1211,34 @@ impl PlayerController {
             return;
         }
 
-        if idx > 0 {
-            self.play_track_no_history_without_crossfade(idx - 1);
-        } else if *self.loop_mode.peek() == LoopMode::Queue {
-            self.play_track_no_history_without_crossfade(queue_len - 1);
-        }
+        let prev_idx = if queue_index > 0 {
+            queue_index - 1
+        } else {
+            if *self.loop_mode.peek() == LoopMode::None {
+                // front of queue and no loop enabled, do nothing
+                return;
+            }
+            queue_len - 1
+        };
+
+        self.play_track_no_history_without_crossfade(prev_idx);
     }
 
     fn rebuild_shuffle_order(&mut self) {
         use rand::seq::SliceRandom;
         let queue_len = self.queue.peek().len();
         let current = *self.current_queue_index.peek();
-        let mut order: Vec<usize> = (0..queue_len).filter(|&i| i != current).collect();
+        let mut order: Vec<usize> = (0..queue_len).collect();
         order.shuffle(&mut rand::thread_rng());
+
+        // move the current track index to the front of the shuffle order
+        order
+            .iter()
+            .position(|&idx| idx == current)
+            .map(|idx| order.swap(idx, 0));
+
+        // reset current index to match the currently played track
+        self.current_queue_index.set(0);
         self.shuffle_order.set(order);
     }
 
@@ -1220,6 +1247,10 @@ impl PlayerController {
         self.shuffle.set(now_on);
         if now_on {
             self.rebuild_shuffle_order();
+        } else {
+            // disabling shuffle, reset the current queue index to the currently played track in the queue
+            let idx = *self.current_queue_index.peek();
+            self.current_queue_index.set(self.shuffle_order.peek()[idx]);
         }
     }
 
@@ -1234,11 +1265,16 @@ impl PlayerController {
 
     pub fn resume(&mut self) {
         if !self.player.peek().can_resume() {
-            let idx = *self.current_queue_index.peek();
-            if let Some(track) = self.current_track(idx) {
+            let queue_idx = *self.current_queue_index.peek();
+            let track_idx = if *self.shuffle.peek() {
+                self.shuffle_order.peek()[queue_idx]
+            } else {
+                queue_idx
+            };
+            if let Some(track) = self.current_track(track_idx) {
                 let progress_secs = (*self.current_song_progress.peek()).min(track.duration);
                 self.set_pending_resume_for_track(&track, progress_secs);
-                self.play_track_no_history(idx);
+                self.play_track_no_history(track_idx);
             }
             return;
         }
@@ -1300,7 +1336,9 @@ impl PlayerController {
         }
 
         let idx = current_queue_index.min(queue_len - 1);
-        let track = self.current_track(idx).expect("queue index should be valid");
+        let track = self
+            .current_track(idx)
+            .expect("queue index should be valid");
         let progress_secs = progress_secs.min(track.duration);
 
         self.hydrate_current_track_metadata(idx, progress_secs);
@@ -1329,11 +1367,11 @@ pub fn use_player_controller(
     let is_loading = use_signal(|| false);
     let skip_in_progress = use_signal(|| false);
     let history = use_signal(|| Vec::new());
-    let shuffle = use_signal(|| false);
-    let shuffle_order = use_signal(|| Vec::<usize>::new());
     let loop_mode = use_signal(|| LoopMode::None);
     let pending_resume = use_signal(|| None::<PendingResumeState>);
     let pending_crossfade_ui = use_signal(|| None::<PendingCrossfadeUiState>);
+    let shuffle = use_signal(|| false);
+    let shuffle_order = use_signal(Vec::<usize>::new);
 
     PlayerController {
         player,
